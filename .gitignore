@@ -1,0 +1,10 @@
+# Claude Code session data
+.claude/
+
+# OpenSpec planning artifacts
+openspec/
+
+# Agent/LLM prompt files
+*-prompt.md
+*-agent-prompt.md
+trueforge-agent-prompt.md
