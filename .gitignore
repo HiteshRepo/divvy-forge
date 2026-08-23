@@ -1,3 +1,6 @@
+# Secrets
+.env
+
 # Claude Code session data
 .claude/
 
