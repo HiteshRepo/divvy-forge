@@ -164,6 +164,15 @@ TrueForge supports on-demand sandboxed execution via the **Daytona** provider (c
 2. Select Daytona preset
 3. Add your Daytona API key
 
+### Daytona Account Details (divvy-forge)
+
+- **Plan**: Tier 1 (free)
+- **Region**: EU
+- **Per-sandbox limits**: 4 vCPU, 8 GiB RAM, 10 GiB storage
+- **Rate limits**: 600 sandbox creations/min, 50,000 lifecycle requests/min
+- **GPU**: locked on free tier (not needed — pure Python analysis)
+- **Billing**: pay-as-you-go after $200 free credits; on-demand spin-up + auto-shutdown means cost for this project is negligible
+
 ### Enabling per Agent
 
 ```yaml
@@ -376,7 +385,7 @@ Monorepo tooling: `pnpm` workspaces.
 ```
 GITHUB_TOKEN         # scoped to HiteshRepo/stock-screeners (contents:read+write, pull_requests:write)
 SCREENER_COOKIE      # session cookie for Screener.in (or omit if yfinance-only)
-TRUEFORGE_API_KEY    # if auth enabled on local/hosted instance
+TRUEFORGE_API_KEY    # optional — only needed if auth is explicitly enabled; not required for local mode
 DAYTONA_API_KEY      # for sandbox execution
 ```
 
