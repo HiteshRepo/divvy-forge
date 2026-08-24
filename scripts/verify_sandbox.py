@@ -27,12 +27,12 @@ import time
 sys.path.insert(0, "src")
 
 from divvy_forge.config import validate_env
-from divvy_forge.trueforge_client import ModelMessageEvent, TrueForgeClient
+from divvy_forge.trueforge_client import TrueForgeClient, TurnDoneEvent
 
 _SMOKE_AGENT_NAME = "divvy-forge-sandbox-smoke-test"
 
 _SMOKE_MANIFEST = {
-    "model": "openai/gpt-4o",
+    "model": {"name": "openai/gpt-4o"},
     "instructions": (
         "You are a sandbox smoke-test agent. "
         "When the user says 'run smoke test', write a Python script that prints exactly "
@@ -73,26 +73,22 @@ def main() -> int:
     # 2. Create session.
     _print("Creating session...")
     try:
-        session = client.create_session(agent.id)
+        session = client.create_session(agent.name)
     except Exception as exc:
         _print(f"Failed to create session: {exc}")
         return 1
 
-    # 3. Submit turn.
+    # 3. Submit turn and stream events.
     _print("Running turn...")
-    try:
-        turn = client.create_turn(session.id, _SMOKE_MESSAGE)
-    except Exception as exc:
-        _print(f"Failed to create turn: {exc}")
-        return 1
-
-    # 4. Stream events and collect the assistant's reply.
     assistant_reply: str | None = None
     deadline = time.monotonic() + _MAX_WAIT_S
     try:
-        for event in client.stream_turn(session.id, turn.id):
-            if isinstance(event, ModelMessageEvent):
-                assistant_reply = event.content
+        for event in client.stream_turn(session.id, _SMOKE_MESSAGE):
+            if isinstance(event, TurnDoneEvent):
+                if event.status == "error":
+                    _print(f"Turn failed: {event.error_message}")
+                    return 1
+                assistant_reply = event.output_content
             if time.monotonic() > deadline:
                 _print(f"Timed out after {_MAX_WAIT_S}s waiting for sandbox output.")
                 return 1
