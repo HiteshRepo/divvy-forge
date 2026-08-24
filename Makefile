@@ -56,6 +56,32 @@ serve-market-data:  ## Start market-data-fetcher MCP server over stdio
 serve-github-pr:  ## Start github-pr-opener MCP server over stdio
 	$(PYTHON) -m divvy_forge.github_pr_opener
 
+# ── TrueForge resource management ───────────────────────────────────────────
+TF_URL ?= http://localhost:8790
+
+.PHONY: agents-list
+agents-list:  ## List all registered agents
+	@curl -s $(TF_URL)/api/v1/agents | python3 -m json.tool
+
+.PHONY: agents-delete
+agents-delete:  ## Delete agent by name   NAME=my-agent make agents-delete
+	@test -n "$(NAME)" || (echo "Usage: NAME=my-agent make agents-delete" && exit 1)
+	$(eval AGENT_ID := $(shell curl -s $(TF_URL)/api/v1/agents | python3 -c "import sys,json; agents=json.load(sys.stdin)['data']; match=[a for a in agents if a['name']=='$(NAME)']; print(match[0]['id'] if match else '')"))
+	@test -n "$(AGENT_ID)" || (echo "Agent '$(NAME)' not found" && exit 1)
+	@curl -s -X DELETE $(TF_URL)/api/v1/agents/$(AGENT_ID) && echo "Deleted agent '$(NAME)' ($(AGENT_ID))"
+
+.PHONY: mcp-list
+mcp-list:  ## List all registered MCP servers
+	@curl -s $(TF_URL)/api/v1/settings/mcp-servers | python3 -m json.tool
+
+.PHONY: providers-list
+providers-list:  ## List all registered model providers
+	@curl -s $(TF_URL)/api/v1/settings/model-providers | python3 -m json.tool
+
+.PHONY: sessions-list
+sessions-list:  ## List recent sessions
+	@curl -s $(TF_URL)/api/v1/sessions | python3 -m json.tool
+
 # ── Sandbox verification ─────────────────────────────────────────────────────
 .PHONY: sandbox-verify
 sandbox-verify:  ## Smoke-test Daytona sandbox (deploy minimal agent, run trivial script)
