@@ -88,7 +88,7 @@ TrueForge uses [Daytona](https://www.daytona.io/) as its sandbox provider for is
 
 1. Start TrueForge locally (or open your hosted instance):
    ```bash
-   OPENAI_API_KEY=sk-... npx @truefoundry/trueforge
+   source .env && npx @truefoundry/trueforge
    # Opens at http://localhost:8790
    ```
 2. Navigate to **Settings → Sandbox providers**
@@ -124,8 +124,10 @@ If the test fails with a Daytona authentication error, double-check that the API
 
 ## 5. Start TrueForge
 
+With `OPENAI_API_KEY` in your `.env`, source it before starting TrueForge:
+
 ```bash
-OPENAI_API_KEY=sk-... npx @truefoundry/trueforge
+source .env && npx @truefoundry/trueforge
 ```
 
 TrueForge runs on `http://localhost:8790` by default.
