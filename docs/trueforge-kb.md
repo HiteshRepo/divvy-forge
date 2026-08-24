@@ -418,6 +418,26 @@ proposal-coordinator  (root agent)
 
 No further nesting — matches TrueForge's one-level delegation constraint.
 
+### Deploy order (hard dependency)
+
+MCP servers MUST be registered before the coordinator agent. TrueForge
+resolves `mcp_servers` names in the manifest against registered connectors
+at agent-creation time. Creating the agent before its connectors exist will
+result in broken tool references.
+
+Correct order in `deploy.py`:
+
+```
+1. register_mcp_server("divvy-reader", ...)
+2. register_mcp_server("market-data-fetcher", ...)
+3. register_mcp_server("github-pr-opener", ...)
+4. register_agent("coordinator", manifest)   # references the above by name
+```
+
+All four calls are idempotent — safe to re-run on every deploy.
+
+---
+
 ### Approval gate
 
 Agent opens GitHub PR → terminates. Human reviews and merges. No `tool.approval_required` used for the main gate — the PR merge IS the approval.
