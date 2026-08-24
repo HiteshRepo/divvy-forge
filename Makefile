@@ -56,6 +56,11 @@ serve-market-data:  ## Start market-data-fetcher MCP server over stdio
 serve-github-pr:  ## Start github-pr-opener MCP server over stdio
 	$(PYTHON) -m divvy_forge.github_pr_opener
 
+# ── Sandbox verification ─────────────────────────────────────────────────────
+.PHONY: sandbox-verify
+sandbox-verify:  ## Smoke-test Daytona sandbox (deploy minimal agent, run trivial script)
+	$(PYTHON) scripts/verify_sandbox.py
+
 # ── Deploy ───────────────────────────────────────────────────────────────────
 .PHONY: deploy
 deploy:  ## Register MCP servers and coordinator agent on the TrueForge instance
