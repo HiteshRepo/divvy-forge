@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "divvy-forge"
+version = "0.1.0"
+description = "TrueForge-hosted agent that reviews dividend holdings and proposes GitHub PR updates"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx==0.27.2",
+    "mcp==1.3.0",
+    "yfinance==0.2.54",
+    "requests==2.32.3",
+    "beautifulsoup4==4.12.3",
+    "pydantic==2.10.5",
+    "click==8.1.8",
+    "python-dotenv==1.0.1",
+    "lxml==5.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+    "pytest-httpx==0.34.0",
+    "respx==0.21.1",
+    "ruff==0.9.2",
+    "mypy==1.14.1",
+]
+
+[project.scripts]
+divvy-batch = "divvy_forge.batch_runner:cli"
+divvy-single = "divvy_forge.batch_runner:cli_single"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
