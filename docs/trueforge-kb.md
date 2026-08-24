@@ -445,3 +445,4 @@ Agent opens GitHub PR → terminates. Human reviews and merges. No `tool.approva
 ### Batch state log
 
 Stored as a JSON file committed to `divvy-forge` (not in TrueForge session state, since sandbox files only persist within a session). On restart, load the file and skip tickers with `pr_opened` status.
+
