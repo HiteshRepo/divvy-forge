@@ -114,6 +114,15 @@ class ThreadDoneEvent:
     summary: str | None = None
 
 
+@dataclass(frozen=True)
+class TurnDoneEvent:
+    """The turn has completed. ``output_content`` is the final assistant text (if any)."""
+
+    status: str  # "done" | "error" | "cancelled"
+    output_content: str | None = None
+    error_message: str | None = None
+
+
 #: Union of all typed SSE event objects yielded by :meth:`TrueForgeClient.stream_turn`.
 SSEEvent = (
     ModelMessageEvent
@@ -122,6 +131,7 @@ SSEEvent = (
     | ToolApprovalRequiredEvent
     | ThreadCreatedEvent
     | ThreadDoneEvent
+    | TurnDoneEvent
 )
 
 
@@ -139,36 +149,46 @@ def _parse_sse_event(data: dict[str, Any]) -> SSEEvent | None:
     """
     event_type = data.get("type", "")
 
-    if event_type == "model.message":
-        return ModelMessageEvent(content=data.get("content", ""))
+    # model.message is a start-of-message marker; content arrives via deltas.
+    # model.message.delta carries streaming content — skipped (non-actionable).
+    # The full text is available in turn.done → state.output.content.
 
     if event_type == "tool.call":
         return ToolCallEvent(
-            tool_name=data.get("toolName", ""),
-            args=data.get("args", {}),
-            call_id=data.get("callId"),
+            tool_name=data.get("toolName", data.get("tool_name", "")),
+            args=data.get("args", data.get("input", {})),
+            call_id=data.get("callId", data.get("id")),
         )
 
     if event_type == "tool.response":
         return ToolResponseEvent(
-            tool_name=data.get("toolName", ""),
-            result=data.get("result"),
-            call_id=data.get("callId"),
+            tool_name=data.get("toolName", data.get("tool_name", "")),
+            result=data.get("result", data.get("output")),
+            call_id=data.get("callId", data.get("id")),
         )
 
     if event_type == "tool.approval_required":
         return ToolApprovalRequiredEvent(
-            tool_name=data.get("toolName", ""),
-            args=data.get("args", {}),
+            tool_name=data.get("toolName", data.get("tool_name", "")),
+            args=data.get("args", data.get("input", {})),
         )
 
     if event_type == "thread.created":
-        return ThreadCreatedEvent(thread_id=data.get("threadId", ""))
+        return ThreadCreatedEvent(thread_id=data.get("threadId", data.get("thread_id", "")))
 
     if event_type == "thread.done":
         return ThreadDoneEvent(
-            thread_id=data.get("threadId", ""),
+            thread_id=data.get("threadId", data.get("thread_id", "")),
             summary=data.get("summary"),
+        )
+
+    if event_type == "turn.done":
+        state = data.get("state", {})
+        output = state.get("output") or {}
+        return TurnDoneEvent(
+            status=state.get("status", "done"),
+            output_content=output.get("content") if isinstance(output, dict) else None,
+            error_message=state.get("message"),
         )
 
     return None
@@ -243,56 +263,64 @@ class TrueForgeClient:
         Raises:
             httpx.HTTPStatusError: On API error (including 409 name collision).
         """
-        data = self._post("/api/v1/agents", {"name": name, "manifest": manifest})
+        resp = self._post("/api/v1/agents", {"name": name, "manifest": manifest})
+        data = resp.get("data", resp)
         return Agent(id=data["id"], name=data["name"], manifest=data["manifest"])
 
     def get_agent(self, agent_id: str) -> Agent:
         """Fetch an existing agent by ID."""
-        data = self._get(f"/api/v1/agents/{agent_id}")
+        resp = self._get(f"/api/v1/agents/{agent_id}")
+        data = resp.get("data", resp)
         return Agent(id=data["id"], name=data["name"], manifest=data["manifest"])
 
     # ------------------------------------------------------------------
     # Session management
     # ------------------------------------------------------------------
 
-    def create_session(self, agent_id: str) -> Session:
-        """Create a new conversation session for the given agent."""
-        data = self._post("/api/v1/sessions", {"agentId": agent_id})
-        return Session(id=data["id"], agent_id=data["agentId"])
+    def create_session(self, agent_name: str) -> Session:
+        """Create a new conversation session for the given agent name."""
+        resp = self._post("/api/v1/sessions", {"agent": {"name": agent_name}})
+        data = resp.get("data", resp)
+        return Session(id=data["id"], agent_id=data["agent"]["id"])
 
     # ------------------------------------------------------------------
     # Turn management
     # ------------------------------------------------------------------
 
     def create_turn(self, session_id: str, user_message: str) -> Turn:
-        """Submit a user message and start a new turn.
+        """Submit a user message and start a new turn (non-streaming).
 
-        The turn begins in ``"running"`` status. Use :meth:`stream_turn` to
-        consume its SSE event stream, or :meth:`get_turn` to poll for status.
+        Posts with ``stream: false`` so the server returns a JSON turn object
+        immediately. Use :meth:`stream_turn` to submit and consume events, or
+        :meth:`get_turn` to poll status on an already-running turn.
         """
-        data = self._post(
+        resp = self._post(
             f"/api/v1/sessions/{session_id}/turns",
-            {"userMessage": user_message},
+            {
+                "input": [{"type": "user.message", "content": user_message}],
+                "stream": False,
+            },
         )
+        data = resp.get("data", resp)
+        state = data.get("state", {})
         return Turn(
             id=data["id"],
-            session_id=data["sessionId"],
-            user_message=data["userMessage"],
-            status=data["status"],
-            assistant_message=data.get("assistantMessage"),
+            session_id=data["session_id"],
+            user_message=user_message,
+            status=state.get("status", "running"),
+            assistant_message=None,
         )
 
-    def stream_turn(self, session_id: str, turn_id: str) -> Iterator[SSEEvent]:
-        """Stream SSE events for a running turn.
+    def stream_turn(self, session_id: str, user_message: str) -> Iterator[SSEEvent]:
+        """Submit a user message and stream SSE events until the turn completes.
 
-        Yields typed :data:`SSEEvent` objects as they arrive. Unknown or
-        informational event types (e.g. ``model.message.delta``) are silently
-        skipped. The stream closes when the turn completes (``thread.done``
-        or server closes the connection).
+        The POST body sets ``stream: true`` (the default), so the server
+        responds with an SSE stream. Yields typed :data:`SSEEvent` objects.
+        Unknown or informational event types are silently skipped.
 
         Args:
-            session_id: Session that owns the turn.
-            turn_id:    Turn whose event stream to consume.
+            session_id:   Session to run the turn in.
+            user_message: User message content.
 
         Yields:
             One typed event object per actionable SSE frame.
@@ -300,8 +328,12 @@ class TrueForgeClient:
         Raises:
             httpx.HTTPStatusError: If the server returns a non-2xx status.
         """
-        path = f"/api/v1/sessions/{session_id}/turns/{turn_id}/stream"
-        with self._http.stream("GET", path) as response:
+        path = f"/api/v1/sessions/{session_id}/turns"
+        body = {
+            "input": [{"type": "user.message", "content": user_message}],
+            "stream": True,
+        }
+        with self._http.stream("POST", path, json=body) as response:
             response.raise_for_status()
             for line in response.iter_lines():
                 if not line.startswith("data:"):
@@ -319,7 +351,8 @@ class TrueForgeClient:
 
     def get_turn(self, session_id: str, turn_id: str) -> Turn:
         """Fetch the current state of a turn (for polling instead of streaming)."""
-        data = self._get(f"/api/v1/sessions/{session_id}/turns/{turn_id}")
+        resp = self._get(f"/api/v1/sessions/{session_id}/turns/{turn_id}")
+        data = resp.get("data", resp)
         return Turn(
             id=data["id"],
             session_id=data["sessionId"],
@@ -389,6 +422,12 @@ class TrueForgeClient:
             return self.create_agent(name, manifest)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
-                data = exc.response.json()
-                return Agent(id=data["id"], name=data["name"], manifest=data["manifest"])
+                # 409 body is just {"error": {"message": "..."}}, no agent data.
+                # Find the existing agent by name from the list endpoint.
+                resp = self._get("/api/v1/agents")
+                agents = resp.get("data", [])
+                for item in agents:
+                    if item.get("name") == name:
+                        return Agent(id=item["id"], name=item["name"], manifest=item["manifest"])
+                raise RuntimeError(f"Agent '{name}' reported as existing (409) but not found in list.")
             raise
