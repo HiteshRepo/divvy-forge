@@ -380,9 +380,28 @@ Monorepo tooling: `pnpm` workspaces.
 - **Sandbox**: Daytona (requires API key at setup time)
 - **Agent manifests**: YAML files applied via `trueforge_client.py` at deploy time
 
+### Model provider
+
+**Model used:** `openai/gpt-4o`
+
+Only `OPENAI_API_KEY` is available for this project. Configure it on the TrueForge
+server (not in divvy-forge's `.env`) under **Settings → Model providers → OpenAI**,
+or pass it when starting TrueForge locally:
+
+```bash
+OPENAI_API_KEY=sk-... npx @truefoundry/trueforge
+```
+
+All agent manifests in divvy-forge MUST use `openai/gpt-4o` (or another OpenAI model).
+Do NOT use Anthropic or other provider model strings.
+
 ### Required env vars
 
 ```
+# On the TrueForge server
+OPENAI_API_KEY       # model provider credentials — set in TrueForge, not in divvy-forge .env
+
+# In divvy-forge .env
 GITHUB_TOKEN         # scoped to HiteshRepo/stock-screeners (contents:read+write, pull_requests:write)
 SCREENER_COOKIE      # session cookie for Screener.in (or omit if yfinance-only)
 TRUEFORGE_API_KEY    # optional — only needed if auth is explicitly enabled; not required for local mode
