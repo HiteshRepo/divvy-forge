@@ -59,6 +59,10 @@ serve-github-pr:  ## Start github-pr-opener MCP server over stdio
 # ── TrueForge resource management ───────────────────────────────────────────
 TF_URL ?= http://localhost:8790
 
+.PHONY: trueforge-local-up
+trueforge-local-up: 
+	source ~/.nvm/nvm.sh && nvm use 22 && source .env && npx @truefoundry/trueforge
+
 .PHONY: agents-list
 agents-list:  ## List all registered agents
 	@curl -s $(TF_URL)/api/v1/agents | python3 -m json.tool
