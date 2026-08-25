@@ -14,15 +14,16 @@ or via the registered entry-point::
     divvy-reader
 """
 
-from __future__ import annotations
-
 import base64
 import os
 import re
 from dataclasses import asdict, dataclass
 
 import httpx
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Constants
