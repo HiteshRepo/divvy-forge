@@ -18,6 +18,9 @@ build/
 # OpenSpec planning artifacts
 openspec/
 
+# Local demo notes
+DEMO.md
+
 # Agent/LLM prompt files
 *-prompt.md
 *-agent-prompt.md
