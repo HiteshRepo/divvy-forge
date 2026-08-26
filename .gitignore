@@ -20,6 +20,7 @@ openspec/
 
 # Local demo notes
 DEMO.md
+demos/
 
 # Agent/LLM prompt files
 *-prompt.md
