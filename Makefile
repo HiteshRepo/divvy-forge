@@ -43,6 +43,13 @@ single:  ## Run single-ticker mode   TICKER=INFY make single
 	@test -n "$(TICKER)" || (echo "Usage: TICKER=INFY make single" && exit 1)
 	$(PYTHON) -m divvy_forge.batch_runner --ticker $(TICKER)
 
+# ── Protocol demo ────────────────────────────────────────────────────────────
+SERVER ?= market-data
+
+.PHONY: demo-protocol
+demo-protocol:  ## Show raw MCP JSON-RPC messages   SERVER=divvy-reader make demo-protocol
+	$(PYTHON) scripts/protocol_demo.py $(SERVER)
+
 # ── MCP servers (for local testing without TrueForge) ───────────────────────
 MCP := $(VENV)/bin/mcp
 
