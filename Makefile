@@ -44,6 +44,8 @@ single:  ## Run single-ticker mode   TICKER=INFY make single
 	$(PYTHON) -m divvy_forge.batch_runner --ticker $(TICKER)
 
 # ── MCP servers (for local testing without TrueForge) ───────────────────────
+MCP := $(VENV)/bin/mcp
+
 .PHONY: serve-divvy-reader
 serve-divvy-reader:  ## Start divvy-reader MCP server over stdio
 	$(PYTHON) -m divvy_forge.divvy_reader
@@ -55,6 +57,18 @@ serve-market-data:  ## Start market-data-fetcher MCP server over stdio
 .PHONY: serve-github-pr
 serve-github-pr:  ## Start github-pr-opener MCP server over stdio
 	$(PYTHON) -m divvy_forge.github_pr_opener
+
+.PHONY: inspect-divvy-reader
+inspect-divvy-reader:  ## Open MCP Inspector for divvy-reader in browser
+	$(MCP) dev src/divvy_forge/divvy_reader.py
+
+.PHONY: inspect-market-data
+inspect-market-data:  ## Open MCP Inspector for market-data-fetcher in browser
+	$(MCP) dev src/divvy_forge/market_data_fetcher.py
+
+.PHONY: inspect-github-pr
+inspect-github-pr:  ## Open MCP Inspector for github-pr-opener in browser
+	$(MCP) dev src/divvy_forge/github_pr_opener.py
 
 # ── TrueForge resource management ───────────────────────────────────────────
 TF_URL ?= http://localhost:8790

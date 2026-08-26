@@ -33,6 +33,7 @@ dev = [
 divvy-batch = "divvy_forge.batch_runner:cli"
 divvy-single = "divvy_forge.batch_runner:cli_single"
 divvy-reader = "divvy_forge.divvy_reader:mcp"
+market-data-fetcher = "divvy_forge.market_data_fetcher:mcp"
 
 [tool.setuptools.packages.find]
 where = ["src"]
