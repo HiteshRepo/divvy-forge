@@ -1,8 +1,8 @@
 """Unit tests for the market-data-fetcher module stack.
 
 Covers:
-  screener_client  — success, DPS / FCF parsing, 429 retry, 5xx retry,
-                     ticker-not-found, auth error, max-retry exhaustion
+  screener_client  — HTML scraping success, DPS / FCF parsing, 429 retry,
+                     5xx retry, ticker-not-found (empty search), max-retry
   yfinance_client  — success, NS suffix, dividend history, missing fields,
                      ticker-not-found, data-fetch-failed
   market_data_fetcher — primary success, fallback triggered, both fail,
@@ -26,39 +26,47 @@ from divvy_forge.yfinance_client import YFinanceError
 # Shared fixtures / helpers
 # ---------------------------------------------------------------------------
 
-SAMPLE_SCREENER_RESPONSE = {
-    "name": "Test Corp",
-    "ratios": [
-        {"name": "Dividend Yield", "value": "3.50%"},
-        {"name": "EPS in Rs", "value": "42.5"},
-        {"name": "Payout ratio", "value": "45.0"},
-    ],
-    "consolidated": {
-        "cash_flows": {
-            "headers": ["", "Mar 2024", "Mar 2023", "Mar 2022", "Mar 2021", "Mar 2020"],
-            "rows": [
-                {
-                    "name": "Cash from Operating Activity",
-                    "values": [1000.0, 900.0, 800.0, 700.0, 600.0],
-                },
-                {
-                    "name": "Capital Expenditure",
-                    "values": [-200.0, -150.0, -100.0, -80.0, -60.0],
-                },
-                {
-                    "name": "Dividends Paid",
-                    "values": [50.0, 45.0, 40.0, 35.0, 30.0],
-                },
-            ],
-        }
-    },
-}
+SEARCH_URL = "https://www.screener.in/api/company/search/?q=INFY"
+PAGE_URL = "https://www.screener.in/company/INFY/consolidated/"
+SEARCH_RESULT = [{"id": 1489, "name": "Infosys Ltd", "url": "/company/INFY/consolidated/"}]
+
+SAMPLE_SCREENER_HTML = """
+<!DOCTYPE html><html><body>
+<ul id="top-ratios">
+  <li><span class="name">Dividend Yield</span><span class="number">3.50 %</span></li>
+  <li><span class="name">Stock P/E</span><span class="number">26.5</span></li>
+</ul>
+<section id="profit-loss">
+  <table>
+    <thead>
+      <tr><th></th><th>Mar 2020</th><th>Mar 2021</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Sales</td><td>76,329</td><td>90,791</td><td>1,21,641</td><td>1,46,767</td><td>1,53,670</td></tr>
+      <tr><td>EPS in Rs</td><td>38.57</td><td>46.31</td><td>58.75</td><td>60.06</td><td>63.95</td></tr>
+      <tr><td>Dividend Payout %</td><td>56</td><td>59</td><td>68</td><td>70</td><td>71</td></tr>
+    </tbody>
+  </table>
+</section>
+<section id="cash-flow">
+  <table>
+    <thead>
+      <tr><th></th><th>Mar 2020</th><th>Mar 2021</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Cash from Operating Activity +</td><td>600</td><td>700</td><td>800</td><td>900</td><td>1,000</td></tr>
+      <tr><td>Capital Expenditure</td><td>60</td><td>80</td><td>100</td><td>150</td><td>200</td></tr>
+    </tbody>
+  </table>
+</section>
+</body></html>
+"""
 
 SAMPLE_YFINANCE_INFO = {
     "symbol": "INFY.NS",
     "shortName": "Infosys Limited",
-    "dividendYield": 0.025,
-    "payoutRatio": 0.40,
+    "dividendYield": 2.5,   # yfinance 1.x returns percentage directly (not decimal)
+    "payoutRatio": 0.40,    # yfinance 1.x still returns decimal for payoutRatio
     "trailingEps": 65.3,
     "regularMarketPrice": 1450.0,
 }
@@ -88,84 +96,84 @@ def _make_yfinance_mock(
     return mock_yf
 
 
+def _mock_screener_success():
+    """Register respx mocks for a successful screener fetch of INFY."""
+    respx.get(SEARCH_URL).mock(return_value=httpx.Response(200, json=SEARCH_RESULT))
+    respx.get(PAGE_URL).mock(return_value=httpx.Response(200, text=SAMPLE_SCREENER_HTML))
+
+
 # ===========================================================================
 # screener_client tests
 # ===========================================================================
 
 
 class TestScreenerClientSuccess:
-    @pytest.fixture(autouse=True)
-    def set_cookie(self, monkeypatch):
-        monkeypatch.setenv("SCREENER_COOKIE", "test-session-cookie")
-
     @respx.mock
     def test_returns_source_and_ticker(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+        _mock_screener_success()
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
-
         assert result["source"] == "screener.in"
         assert result["ticker"] == "INFY"
 
     @respx.mock
-    def test_parses_ratios(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+    def test_parses_dividend_yield_from_top_ratios(self):
+        _mock_screener_success()
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
-
         assert result["dividend_yield_pct"] == pytest.approx(3.50)
-        assert result["eps"] == pytest.approx(42.5)
-        assert result["payout_ratio"] == pytest.approx(45.0)
 
     @respx.mock
-    def test_parses_dividends_per_share_history(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+    def test_parses_eps_from_pl_table(self):
+        _mock_screener_success()
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
+        assert result["eps"] == pytest.approx(63.95)  # most recent year
 
+    @respx.mock
+    def test_parses_payout_ratio_from_pl_table(self):
+        _mock_screener_success()
+        with httpx.Client() as client:
+            result = screener_client.fetch_fundamentals("INFY", http_client=client)
+        assert result["payout_ratio"] == pytest.approx(71.0)  # most recent year
+
+    @respx.mock
+    def test_computes_dps_history_from_eps_and_payout(self):
+        _mock_screener_success()
+        with httpx.Client() as client:
+            result = screener_client.fetch_fundamentals("INFY", http_client=client)
         history = result["dividends_per_share_history"]
         assert history is not None
         assert len(history) == 5
-        assert history[0]["period"] == "Mar 2024"
-        assert history[0]["value"] == pytest.approx(50.0)
+        # Mar 2024: 63.95 × 71 / 100 = 45.40
+        assert history[-1]["period"] == "Mar 2024"
+        assert history[-1]["value"] == pytest.approx(63.95 * 71 / 100, rel=1e-2)
 
     @respx.mock
     def test_computes_free_cash_flow(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+        _mock_screener_success()
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
-
-        # FCF = 1000 - abs(-200) = 800
+        # FCF = 1000 - 200 = 800 (most recent year)
         assert result["free_cash_flow"] == pytest.approx(800.0)
 
     @respx.mock
     def test_fetched_at_and_excerpt_present(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+        _mock_screener_success()
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
-
         assert result["fetched_at"] is not None
         assert isinstance(result["raw_response_excerpt"], str)
         assert len(result["raw_response_excerpt"]) <= 500
 
     @respx.mock
-    def test_missing_ratios_return_none(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json={"name": "Empty Corp", "ratios": []})
+    def test_missing_sections_return_none(self):
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(200, json=SEARCH_RESULT))
+        respx.get(PAGE_URL).mock(
+            return_value=httpx.Response(200, text="<html><body></body></html>")
         )
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
-
         assert result["dividend_yield_pct"] is None
         assert result["eps"] is None
         assert result["payout_ratio"] is None
@@ -174,14 +182,10 @@ class TestScreenerClientSuccess:
 
 
 class TestScreenerClientErrors:
-    @pytest.fixture(autouse=True)
-    def set_cookie(self, monkeypatch):
-        monkeypatch.setenv("SCREENER_COOKIE", "test-session-cookie")
-
     @respx.mock
-    def test_raises_ticker_not_found_on_404(self):
-        respx.get("https://www.screener.in/api/company/FAKE/").mock(
-            return_value=httpx.Response(404)
+    def test_raises_ticker_not_found_on_empty_search(self):
+        respx.get("https://www.screener.in/api/company/search/?q=FAKE").mock(
+            return_value=httpx.Response(200, json=[])
         )
         with httpx.Client() as client:
             with pytest.raises(ScreenerError) as exc_info:
@@ -189,48 +193,40 @@ class TestScreenerClientErrors:
         assert exc_info.value.code == "TICKER_NOT_FOUND"
 
     @respx.mock
-    def test_raises_auth_failed_on_401(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(401)
-        )
+    def test_raises_ticker_not_found_on_page_404(self):
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(200, json=SEARCH_RESULT))
+        respx.get(PAGE_URL).mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
             with pytest.raises(ScreenerError) as exc_info:
                 screener_client.fetch_fundamentals("INFY", http_client=client)
-        assert exc_info.value.code == "AUTH_FAILED"
+        assert exc_info.value.code == "TICKER_NOT_FOUND"
 
     @respx.mock
-    def test_raises_auth_failed_on_403(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(403)
-        )
+    def test_raises_data_fetch_failed_on_search_503(self, monkeypatch):
+        monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
         with httpx.Client() as client:
             with pytest.raises(ScreenerError) as exc_info:
                 screener_client.fetch_fundamentals("INFY", http_client=client)
-        assert exc_info.value.code == "AUTH_FAILED"
+        assert exc_info.value.code == "DATA_FETCH_FAILED"
 
 
 class TestScreenerClientRateLimitRetry:
-    @pytest.fixture(autouse=True)
-    def set_cookie(self, monkeypatch):
-        monkeypatch.setenv("SCREENER_COOKIE", "test-session-cookie")
-
     @respx.mock
     def test_retries_on_429_then_succeeds(self, monkeypatch):
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
 
         call_count = 0
-        responses = [
-            httpx.Response(429),
-            httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE),
-        ]
+        search_responses = [httpx.Response(429), httpx.Response(200, json=SEARCH_RESULT)]
 
-        def side_effect(request):
+        def search_side_effect(request):
             nonlocal call_count
-            resp = responses[min(call_count, len(responses) - 1)]
+            resp = search_responses[min(call_count, len(search_responses) - 1)]
             call_count += 1
             return resp
 
-        respx.get("https://www.screener.in/api/company/INFY/").mock(side_effect=side_effect)
+        respx.get(SEARCH_URL).mock(side_effect=search_side_effect)
+        respx.get(PAGE_URL).mock(return_value=httpx.Response(200, text=SAMPLE_SCREENER_HTML))
 
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
@@ -241,9 +237,7 @@ class TestScreenerClientRateLimitRetry:
     @respx.mock
     def test_exhausts_retries_on_persistent_429(self, monkeypatch):
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(429)
-        )
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(429))
         with httpx.Client() as client:
             with pytest.raises(ScreenerError) as exc_info:
                 screener_client.fetch_fundamentals("INFY", http_client=client)
@@ -254,18 +248,16 @@ class TestScreenerClientRateLimitRetry:
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
 
         call_count = 0
-        responses = [
-            httpx.Response(503),
-            httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE),
-        ]
+        search_responses = [httpx.Response(503), httpx.Response(200, json=SEARCH_RESULT)]
 
-        def side_effect(request):
+        def search_side_effect(request):
             nonlocal call_count
-            resp = responses[min(call_count, len(responses) - 1)]
+            resp = search_responses[min(call_count, len(search_responses) - 1)]
             call_count += 1
             return resp
 
-        respx.get("https://www.screener.in/api/company/INFY/").mock(side_effect=side_effect)
+        respx.get(SEARCH_URL).mock(side_effect=search_side_effect)
+        respx.get(PAGE_URL).mock(return_value=httpx.Response(200, text=SAMPLE_SCREENER_HTML))
 
         with httpx.Client() as client:
             result = screener_client.fetch_fundamentals("INFY", http_client=client)
@@ -282,26 +274,22 @@ class TestYFinanceClientSuccess:
     def test_returns_source_and_ticker(self):
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
         result = yfinance_client.fetch_fundamentals("INFY", yfin_module=mock_yf)
-
         assert result["source"] == "yfinance"
         assert result["ticker"] == "INFY"
 
-    def test_converts_decimal_yield_to_pct(self):
+    def test_returns_yield_as_pct(self):
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
         result = yfinance_client.fetch_fundamentals("INFY", yfin_module=mock_yf)
-
-        assert result["dividend_yield_pct"] == pytest.approx(2.5)  # 0.025 × 100
+        assert result["dividend_yield_pct"] == pytest.approx(2.5)  # already % in yfinance 1.x
 
     def test_converts_decimal_payout_to_pct(self):
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
         result = yfinance_client.fetch_fundamentals("INFY", yfin_module=mock_yf)
-
         assert result["payout_ratio"] == pytest.approx(40.0)  # 0.40 × 100
 
     def test_returns_eps(self):
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
         result = yfinance_client.fetch_fundamentals("INFY", yfin_module=mock_yf)
-
         assert result["eps"] == pytest.approx(65.3)
 
     def test_appends_ns_suffix_for_bare_ticker(self):
@@ -321,7 +309,6 @@ class TestYFinanceClientSuccess:
         dividends = pd.Series([14.0, 12.5, 11.0], index=idx)
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO, dividends=dividends)
         result = yfinance_client.fetch_fundamentals("INFY", yfin_module=mock_yf)
-
         history = result["dividends_per_share_history"]
         assert history is not None
         assert len(history) == 3
@@ -360,15 +347,9 @@ class TestYFinanceClientErrors:
 
 
 class TestMarketDataFetcherPrimarySuccess:
-    @pytest.fixture(autouse=True)
-    def set_cookie(self, monkeypatch):
-        monkeypatch.setenv("SCREENER_COOKIE", "test-session-cookie")
-
     @respx.mock
     def test_returns_screener_data_when_available(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_SCREENER_RESPONSE)
-        )
+        _mock_screener_success()
         with httpx.Client() as client:
             result = market_data_fetcher.fetch_fundamentals("INFY", http_client=client)
         assert result["source"] == "screener.in"
@@ -378,22 +359,7 @@ class TestMarketDataFetcherFallback:
     @respx.mock
     def test_falls_back_to_yfinance_on_screener_5xx(self, monkeypatch):
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(503)
-        )
-        mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
-
-        with httpx.Client() as client:
-            result = market_data_fetcher.fetch_fundamentals(
-                "INFY", http_client=client, yfin_module=mock_yf
-            )
-        assert result["source"] == "yfinance"
-
-    @respx.mock
-    def test_falls_back_to_yfinance_on_screener_auth_error(self):
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(403)
-        )
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
 
         with httpx.Client() as client:
@@ -404,8 +370,8 @@ class TestMarketDataFetcherFallback:
 
     @respx.mock
     def test_falls_back_to_yfinance_on_screener_ticker_not_found(self):
-        respx.get("https://www.screener.in/api/company/RARE/").mock(
-            return_value=httpx.Response(404)
+        respx.get("https://www.screener.in/api/company/search/?q=RARE").mock(
+            return_value=httpx.Response(200, json=[])
         )
         mock_yf = _make_yfinance_mock(info=SAMPLE_YFINANCE_INFO)
 
@@ -420,9 +386,7 @@ class TestMarketDataFetcherBothFail:
     @respx.mock
     def test_raises_data_fetch_failed_when_both_sources_error(self, monkeypatch):
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(503)
-        )
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
         mock_yf = _make_yfinance_mock(raise_exc=RuntimeError("yfinance down"))
 
         with httpx.Client() as client:
@@ -434,8 +398,8 @@ class TestMarketDataFetcherBothFail:
 
     @respx.mock
     def test_raises_ticker_not_found_when_both_confirm_unknown(self):
-        respx.get("https://www.screener.in/api/company/FAKE/").mock(
-            return_value=httpx.Response(404)
+        respx.get("https://www.screener.in/api/company/search/?q=FAKE").mock(
+            return_value=httpx.Response(200, json=[])
         )
         mock_yf = _make_yfinance_mock(info={})
 
@@ -449,9 +413,7 @@ class TestMarketDataFetcherBothFail:
     @respx.mock
     def test_error_includes_both_source_messages(self, monkeypatch):
         monkeypatch.setattr("divvy_forge.screener_client.time.sleep", lambda _: None)
-        respx.get("https://www.screener.in/api/company/INFY/").mock(
-            return_value=httpx.Response(503)
-        )
+        respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
         mock_yf = _make_yfinance_mock(raise_exc=RuntimeError("timeout"))
 
         with httpx.Client() as client:

@@ -1,21 +1,34 @@
-"""Screener.in REST client for fetching fundamental data.
+"""Screener.in HTML scraper for fetching fundamental data.
 
-Uses the Screener.in JSON API (https://www.screener.in/api/company/{ticker}/).
-Requires ``SCREENER_COOKIE`` env var for authenticated access.
+Two-step flow (no authentication required):
+  1. ``GET /api/company/search/?q={ticker}`` — confirm ticker exists and resolve
+     the canonical consolidated page URL.
+  2. ``GET /company/{ticker}/consolidated/`` — scrape the HTML page with
+     BeautifulSoup to extract ratios, EPS, payout %, and cash-flow data.
 
 Implements exponential backoff (initial 1 s, max 3 retries) on HTTP 429 and 5xx.
 """
 
 from __future__ import annotations
 
-import os
 import time
+from datetime import datetime, timezone
 
 import httpx
+from bs4 import BeautifulSoup
 
 SCREENER_BASE_URL = "https://www.screener.in"
 _INITIAL_BACKOFF_SECS: float = 1.0
 _MAX_RETRIES: int = 3
+
+_HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; divvy-forge/0.1)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+_JSON_HEADERS = {
+    "User-Agent": "divvy-forge/0.1",
+    "Accept": "application/json",
+}
 
 
 class ScreenerError(Exception):
@@ -24,8 +37,7 @@ class ScreenerError(Exception):
     Attributes
     ----------
     code:
-        Machine-readable code — ``TICKER_NOT_FOUND``, ``AUTH_FAILED``,
-        ``DATA_FETCH_FAILED``.
+        Machine-readable code — ``TICKER_NOT_FOUND``, ``DATA_FETCH_FAILED``.
     context:
         Additional keyword context (e.g. ``ticker=...``).
     """
@@ -37,89 +49,196 @@ class ScreenerError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# HTTP helpers
 # ---------------------------------------------------------------------------
 
 
-def _screener_headers() -> dict[str, str]:
-    cookie = os.environ.get("SCREENER_COOKIE", "")
-    return {
-        "Cookie": cookie,
-        "Accept": "application/json",
-        "User-Agent": "divvy-forge/0.1",
-        "X-Requested-With": "XMLHttpRequest",
-    }
+def _get_with_retry(
+    client: httpx.Client,
+    url: str,
+    headers: dict[str, str],
+    ticker: str,
+) -> httpx.Response:
+    """GET *url* with exponential backoff on 429 / 5xx."""
+    last_error: Exception | None = None
+    backoff = _INITIAL_BACKOFF_SECS
 
+    for attempt in range(_MAX_RETRIES + 1):
+        resp = client.get(url, headers=headers, follow_redirects=True)
 
-def _parse_ratio_value(ratios: list[dict], *names: str) -> float | None:
-    """Find the first matching ratio name in the Screener ratios list and parse its value."""
-    name_set = {n.lower() for n in names}
-    for ratio in ratios:
-        if ratio.get("name", "").strip().lower() in name_set:
-            raw = str(ratio.get("value", "")).strip().rstrip("%").replace(",", "")
-            if raw:
-                try:
-                    return float(raw)
-                except ValueError:
-                    return None
-    return None
+        if resp.status_code == 200:
+            return resp
 
+        if resp.status_code == 404:
+            raise ScreenerError(
+                "TICKER_NOT_FOUND",
+                f"Ticker '{ticker}' not found on Screener.in (HTTP 404).",
+                ticker=ticker,
+            )
 
-def _parse_row_values(rows: list[dict], *row_names: str) -> list[float | None]:
-    """Extract numeric values from a financial-statement row by name (first match)."""
-    name_set = {n.lower() for n in row_names}
-    for row in rows:
-        if row.get("name", "").strip().lower() in name_set:
-            result: list[float | None] = []
-            for v in row.get("values", []):
-                raw = str(v).strip().replace(",", "")
-                try:
-                    result.append(float(raw))
-                except (ValueError, TypeError):
-                    result.append(None)
-            return result
-    return []
-
-
-def _parse_response(ticker: str, data: dict, raw_text: str) -> dict:
-    """Parse a Screener.in API JSON response into a FundamentalsData-compatible dict."""
-    from datetime import datetime, timezone
-
-    fetched_at = datetime.now(timezone.utc).isoformat()
-    raw_response_excerpt = raw_text[:500]
-
-    ratios: list[dict] = data.get("ratios", [])
-
-    dividend_yield_pct = _parse_ratio_value(ratios, "Dividend Yield")
-    eps = _parse_ratio_value(ratios, "EPS in Rs", "EPS")
-    payout_ratio = _parse_ratio_value(ratios, "Payout ratio", "Payout Ratio")
-
-    # --- DPS history and FCF from cash flow statement ---
-    headers: list[str] = []
-    rows: list[dict] = []
-    for source_key in ("consolidated", "standalone"):
-        cf = data.get(source_key, {}).get("cash_flows", {})
-        if cf:
-            headers = cf.get("headers", [])
-            rows = cf.get("rows", [])
+        if resp.status_code == 429 or resp.status_code >= 500:
+            last_error = httpx.HTTPStatusError(
+                f"HTTP {resp.status_code}", request=resp.request, response=resp
+            )
+            if attempt < _MAX_RETRIES:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
             break
 
+        resp.raise_for_status()
+
+    raise ScreenerError(
+        "DATA_FETCH_FAILED",
+        f"Screener.in failed for '{ticker}' after {_MAX_RETRIES} retries. "
+        f"Last error: {last_error}",
+        ticker=ticker,
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTML parsing helpers
+# ---------------------------------------------------------------------------
+
+
+def _to_float(raw: str) -> float | None:
+    """Parse a Screener number string (commas, %, trailing signs) to float."""
+    cleaned = raw.strip().replace(",", "").rstrip("%").rstrip("+").rstrip("-").strip()
+    if not cleaned or cleaned == "-":
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_top_ratios(soup: BeautifulSoup) -> dict[str, str]:
+    """Return name→raw-value pairs from the ``#top-ratios`` ul."""
+    result: dict[str, str] = {}
+    section = soup.find(id="top-ratios")
+    if not section:
+        return result
+    for li in section.find_all("li"):
+        name_tag = li.find(class_="name")
+        # The value span has class "number" plus optional extra classes
+        number_tag = li.find(class_="number")
+        if name_tag and number_tag:
+            result[name_tag.get_text(strip=True)] = number_tag.get_text(strip=True)
+    return result
+
+
+def _parse_section_table(
+    soup: BeautifulSoup, section_id: str
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Parse the first ``<table>`` inside ``<section id=section_id>``.
+
+    Returns ``(period_headers, {row_name: [cell_values]})``.
+    The first column (row label) is used as the key; period headers come from
+    the ``<thead>`` row (skipping the first blank ``<th>``).
+    """
+    section = soup.find(id=section_id)
+    if not section:
+        return [], {}
+
+    table = section.find("table")
+    if not table:
+        return [], {}
+
+    headers: list[str] = []
+    rows: dict[str, list[str]] = {}
+
+    thead = table.find("thead")
+    if thead:
+        header_cells = thead.find_all("th")
+        # First th is blank label column; rest are period headers
+        headers = [th.get_text(strip=True) for th in header_cells[1:]]
+
+    tbody = table.find("tbody")
+    if not tbody:
+        return headers, rows
+
+    for tr in tbody.find_all("tr"):
+        cells = tr.find_all("td")
+        if not cells:
+            continue
+        row_name = cells[0].get_text(strip=True).rstrip(" +").rstrip(" -").strip()
+        if row_name:
+            rows[row_name] = [c.get_text(strip=True) for c in cells[1:]]
+
+    return headers, rows
+
+
+# ---------------------------------------------------------------------------
+# Response parser
+# ---------------------------------------------------------------------------
+
+
+def _parse_html(ticker: str, html: str) -> dict:
+    """Extract fundamentals from a Screener.in consolidated company page."""
+    soup = BeautifulSoup(html, "lxml")
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    raw_response_excerpt = html[:500]
+
+    # --- Live ratios from #top-ratios ---
+    top = _parse_top_ratios(soup)
+    dividend_yield_pct = _to_float(top.get("Dividend Yield", ""))
+
+    # --- P&L table: EPS and payout ratio ---
+    pl_headers, pl_rows = _parse_section_table(soup, "profit-loss")
+
+    eps: float | None = None
+    for key in ("EPS in Rs", "EPS"):
+        if key in pl_rows and pl_rows[key]:
+            # Use the most recent non-TTM value (last before TTM, or last available)
+            vals = [_to_float(v) for v in pl_rows[key]]
+            non_null = [v for v in vals if v is not None]
+            eps = non_null[-1] if non_null else None
+            break
+
+    payout_ratio: float | None = None
+    for key in ("Dividend Payout %", "Dividend Payout"):
+        if key in pl_rows and pl_rows[key]:
+            vals = [_to_float(v) for v in pl_rows[key]]
+            non_null = [v for v in vals if v is not None]
+            payout_ratio = non_null[-1] if non_null else None
+            break
+
+    # --- DPS history: EPS × payout% for each period (last 5) ---
     dividends_per_share_history: list[dict] | None = None
-    if headers and rows:
-        dps_values = _parse_row_values(rows, "Dividends Paid")
-        if dps_values:
-            # headers[0] is typically a blank label; periods start at index 1
-            period_headers = headers[1:] if headers and headers[0] == "" else headers
-            paired = list(zip(period_headers, dps_values))
-            valid = [(p, v) for p, v in paired if v is not None][-5:]
-            dividends_per_share_history = [{"period": p, "value": v} for p, v in valid] or None
+    eps_vals = [_to_float(v) for v in pl_rows.get("EPS in Rs", pl_rows.get("EPS", []))]
+    payout_vals = [
+        _to_float(v)
+        for v in pl_rows.get("Dividend Payout %", pl_rows.get("Dividend Payout", []))
+    ]
+    if pl_headers and eps_vals and payout_vals:
+        periods = pl_headers[: len(eps_vals)]
+        history = []
+        for period, e, p in zip(periods, eps_vals, payout_vals):
+            if e is not None and p is not None:
+                history.append({"period": period, "value": round(e * p / 100, 2)})
+        if history:
+            dividends_per_share_history = history[-5:]
+
+    # --- Cash flow table: FCF = operating CF − |capex| ---
+    _, cf_rows = _parse_section_table(soup, "cash-flow")
 
     free_cash_flow: float | None = None
-    op_cf_vals = _parse_row_values(rows, "Cash from Operating Activity")
-    capex_vals = _parse_row_values(rows, "Capital Expenditure")
-    if op_cf_vals and op_cf_vals[0] is not None:
-        capex = abs(capex_vals[0]) if capex_vals and capex_vals[0] is not None else 0.0
-        free_cash_flow = op_cf_vals[0] - capex
+    op_cf_row = cf_rows.get("Cash from Operating Activity", [])
+    # Capex lives under Investing activity; look for a dedicated row or use investing total
+    capex_row = cf_rows.get("Capital Expenditure", cf_rows.get("Fixed assets", []))
+
+    if op_cf_row:
+        op_vals = [_to_float(v) for v in op_cf_row]
+        op_non_null = [v for v in op_vals if v is not None]
+        if op_non_null:
+            op_cf = op_non_null[-1]
+            capex = 0.0
+            if capex_row:
+                cap_vals = [_to_float(v) for v in capex_row]
+                cap_non_null = [v for v in cap_vals if v is not None]
+                if cap_non_null:
+                    capex = abs(cap_non_null[-1])
+            free_cash_flow = op_cf - capex
 
     return {
         "ticker": ticker,
@@ -143,15 +262,10 @@ def fetch_fundamentals(
     ticker: str,
     http_client: httpx.Client | None = None,
 ) -> dict:
-    if not os.environ.get("SCREENER_COOKIE", "").strip():
-        raise ScreenerError(
-            "AUTH_FAILED",
-            "SCREENER_COOKIE is not set — skipping Screener.in.",
-        )
-    """Fetch fundamental data from Screener.in with exponential backoff.
+    """Fetch fundamental data by scraping Screener.in (no auth required).
 
-    Retries on HTTP 429 and 5xx with an initial delay of 1 s, doubling each
-    attempt, up to :data:`_MAX_RETRIES` retries.
+    Step 1: ``/api/company/search/?q={ticker}`` — verify ticker exists.
+    Step 2: ``/company/{ticker}/consolidated/`` — scrape HTML fundamentals.
 
     Parameters
     ----------
@@ -168,59 +282,31 @@ def fetch_fundamentals(
     Raises
     ------
     ScreenerError
-        ``TICKER_NOT_FOUND`` — HTTP 404 from Screener.in.
-        ``AUTH_FAILED`` — HTTP 401 or 403.
-        ``DATA_FETCH_FAILED`` — max retries exceeded.
+        ``TICKER_NOT_FOUND`` — ticker not found via search or page returns 404.
+        ``DATA_FETCH_FAILED`` — max retries exceeded on transient errors.
     """
-    url = f"{SCREENER_BASE_URL}/api/company/{ticker}/"
 
     def _do(client: httpx.Client) -> dict:
-        last_error: Exception | None = None
-        backoff = _INITIAL_BACKOFF_SECS
+        # Step 1: confirm ticker exists via search
+        search_url = f"{SCREENER_BASE_URL}/api/company/search/?q={ticker}"
+        search_resp = _get_with_retry(client, search_url, _JSON_HEADERS, ticker)
+        results = search_resp.json()
+        if not results:
+            raise ScreenerError(
+                "TICKER_NOT_FOUND",
+                f"Ticker '{ticker}' not found on Screener.in (empty search results).",
+                ticker=ticker,
+            )
 
-        for attempt in range(_MAX_RETRIES + 1):
-            resp = client.get(url, headers=_screener_headers())
+        # Use the canonical URL from search (e.g. "/company/INFY/consolidated/")
+        page_path = results[0].get("url", f"/company/{ticker}/consolidated/")
+        if not page_path.endswith("consolidated/"):
+            page_path = page_path.rstrip("/") + "/consolidated/"
 
-            if resp.status_code == 200:
-                return _parse_response(ticker, resp.json(), resp.text)
-
-            if resp.status_code == 404:
-                raise ScreenerError(
-                    "TICKER_NOT_FOUND",
-                    f"Ticker '{ticker}' not found on Screener.in (HTTP 404).",
-                    ticker=ticker,
-                )
-
-            if resp.status_code in (401, 403):
-                raise ScreenerError(
-                    "AUTH_FAILED",
-                    f"Screener.in authentication failed (HTTP {resp.status_code}). "
-                    "Check SCREENER_COOKIE in your .env file.",
-                )
-
-            # Retryable: 429 and 5xx
-            if resp.status_code == 429 or resp.status_code >= 500:
-                last_error = httpx.HTTPStatusError(
-                    f"HTTP {resp.status_code}",
-                    request=resp.request,
-                    response=resp,
-                )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
-                # Retries exhausted — break to raise DATA_FETCH_FAILED below.
-                break
-
-            # Non-retryable HTTP error (4xx other than 401/403/404)
-            resp.raise_for_status()
-
-        raise ScreenerError(
-            "DATA_FETCH_FAILED",
-            f"Screener.in failed for '{ticker}' after {_MAX_RETRIES} retries. "
-            f"Last error: {last_error}",
-            ticker=ticker,
-        )
+        # Step 2: scrape the consolidated HTML page
+        page_url = f"{SCREENER_BASE_URL}{page_path}"
+        page_resp = _get_with_retry(client, page_url, _HTML_HEADERS, ticker)
+        return _parse_html(ticker, page_resp.text)
 
     if http_client is not None:
         return _do(http_client)

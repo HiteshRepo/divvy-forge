@@ -120,9 +120,9 @@ def fetch_fundamentals(
 
     fetched_at = datetime.now(timezone.utc).isoformat()
 
-    # yfinance yields are in decimal form (0.025 = 2.5%)
-    raw_yield = _safe_float(info.get("dividendYield"))
-    dividend_yield_pct = raw_yield * 100 if raw_yield is not None else None
+    # yfinance 1.x: dividendYield is already a percentage (e.g. 4.42 = 4.42%)
+    # yfinance 1.x: payoutRatio is still a decimal (e.g. 0.646 = 64.6%)
+    dividend_yield_pct = _safe_float(info.get("dividendYield"))
 
     raw_payout = _safe_float(info.get("payoutRatio"))
     payout_ratio = raw_payout * 100 if raw_payout is not None else None
