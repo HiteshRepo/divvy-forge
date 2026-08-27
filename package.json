@@ -1,0 +1,17 @@
+{
+  "name": "divvy-forge-evals",
+  "private": true,
+  "description": "Promptfoo prompt evaluations for divvy-forge subagent prompts",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "promptfoo": "^0.122.1"
+  },
+  "scripts": {
+    "eval:fundamentals": "promptfoo eval -c evals/fundamentals_subagent/promptfoo.yaml",
+    "eval:risk": "promptfoo eval -c evals/risk_subagent/promptfoo.yaml",
+    "eval": "npm run eval:fundamentals && npm run eval:risk",
+    "eval:view": "promptfoo view"
+  }
+}

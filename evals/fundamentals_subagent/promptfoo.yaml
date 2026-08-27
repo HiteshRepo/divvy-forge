@@ -1,0 +1,211 @@
+description: Fundamentals subagent prompt evaluations
+
+prompts:
+  - file://prompt.yaml
+
+providers:
+  - id: openai:gpt-4o
+    config:
+      temperature: 0
+
+# Strip optional markdown code fences before assertions run.
+# The prompt says "raw JSON only" but models sometimes add fences anyway.
+defaultTest:
+  options:
+    transform: "output.replace(/^```(?:json)?\\s*/m, '').replace(/\\s*```$/m, '').trim()"
+  assert:
+    - type: is-json
+      description: Output must be valid JSON
+
+tests:
+  # ── Case 1: improving yield + safe payout ────────────────────────────────
+  # DPS history [14, 16, 18, 19, 25]: 3-period avg of prior = (16+18+19)/3 = 17.67
+  # Latest = 25; 25 ≥ 17.67 + 2 % → improving.
+  # payout_ratio = 40 % → safe.
+  - description: "improving yield, safe payout → yield_trend=improving, payout_sustainability=safe"
+    vars:
+      user_message: |
+        {
+          "ticker": "INFY",
+          "fundamentals": {
+            "ticker": "INFY",
+            "source": "yfinance",
+            "fetched_at": "2026-08-27T10:00:00Z",
+            "dividend_yield_pct": 3.5,
+            "payout_ratio": 40.0,
+            "dividends_per_share_history": [14.0, 16.0, 18.0, 19.0, 25.0],
+            "eps": 62.0,
+            "free_cash_flow": 14500000000,
+            "raw_response_excerpt": "dividend yield: 3.5%"
+          },
+          "stored_yield_pct": 3.2
+        }
+    assert:
+      - type: javascript
+        description: status is ok
+        value: JSON.parse(output).status === 'ok'
+      - type: javascript
+        description: yield_trend is improving
+        value: JSON.parse(output).yield_trend === 'improving'
+      - type: javascript
+        description: payout_sustainability is safe
+        value: JSON.parse(output).payout_sustainability === 'safe'
+      - type: javascript
+        description: suggested_yield_update reflects current market yield
+        value: Math.abs(JSON.parse(output).suggested_yield_update - 3.5) < 0.05
+      - type: javascript
+        description: reasoning is non-empty and references numeric values
+        value: |
+          const d = JSON.parse(output);
+          return typeof d.reasoning === 'string' && d.reasoning.length > 20;
+      - type: llm-rubric
+        value: >
+          The reasoning field cites at least one specific numeric value from the
+          input data (e.g. payout ratio, DPS values, FCF) and explains how
+          yield_trend and payout_sustainability were derived.
+
+  # ── Case 2: deteriorating yield + at-risk payout ─────────────────────────
+  # DPS history [24, 22, 20, 18, 14]: 3-period avg = (22+20+18)/3 = 20
+  # Latest = 14; 14 ≤ 20 − 2 % (19.6) → deteriorating.
+  # payout_ratio = 94 % > 90 % → at_risk.
+  - description: "deteriorating yield, at-risk payout → yield_trend=deteriorating, payout_sustainability=at_risk"
+    vars:
+      user_message: |
+        {
+          "ticker": "ZEEL",
+          "fundamentals": {
+            "ticker": "ZEEL",
+            "source": "screener",
+            "fetched_at": "2026-08-27T10:00:00Z",
+            "dividend_yield_pct": 1.8,
+            "payout_ratio": 94.0,
+            "dividends_per_share_history": [24.0, 22.0, 20.0, 18.0, 14.0],
+            "eps": 15.0,
+            "free_cash_flow": -500000000,
+            "raw_response_excerpt": "dividend yield: 1.8%"
+          },
+          "stored_yield_pct": 2.4
+        }
+    assert:
+      - type: javascript
+        description: status is ok
+        value: JSON.parse(output).status === 'ok'
+      - type: javascript
+        description: yield_trend is deteriorating
+        value: JSON.parse(output).yield_trend === 'deteriorating'
+      - type: javascript
+        description: payout_sustainability is at_risk
+        value: JSON.parse(output).payout_sustainability === 'at_risk'
+      - type: llm-rubric
+        value: >
+          The reasoning explicitly mentions both the high payout ratio (around
+          94 %) and the declining dividend-per-share history as evidence for the
+          deteriorating and at_risk conclusions.
+
+  # ── Case 3: stable yield + watch payout ──────────────────────────────────
+  # DPS history [19, 20, 20, 20, 20]: 3-period avg = (20+20+20)/3 = 20
+  # Latest = 20; within ±2 % of 20 → stable.
+  # payout_ratio = 78 % → watch (between 70 and 90 %).
+  - description: "stable yield, watch payout → yield_trend=stable, payout_sustainability=watch"
+    vars:
+      user_message: |
+        {
+          "ticker": "COALINDIA",
+          "fundamentals": {
+            "ticker": "COALINDIA",
+            "source": "yfinance",
+            "fetched_at": "2026-08-27T10:00:00Z",
+            "dividend_yield_pct": 5.1,
+            "payout_ratio": 78.0,
+            "dividends_per_share_history": [19.0, 20.0, 20.0, 20.0, 20.0],
+            "eps": 28.0,
+            "free_cash_flow": 8200000000,
+            "raw_response_excerpt": "dividend yield: 5.1%"
+          },
+          "stored_yield_pct": 4.9
+        }
+    assert:
+      - type: javascript
+        description: status is ok
+        value: JSON.parse(output).status === 'ok'
+      - type: javascript
+        description: yield_trend is stable
+        value: JSON.parse(output).yield_trend === 'stable'
+      - type: javascript
+        description: payout_sustainability is watch
+        value: JSON.parse(output).payout_sustainability === 'watch'
+
+  # ── Case 4: partial data — payout_ratio null ──────────────────────────────
+  # payout_ratio is null → payout_sustainability must be null.
+  # dividend_yield_pct is present → suggested_yield_update must be computed.
+  - description: "null payout_ratio → payout_sustainability=null, suggested_yield_update still populated"
+    vars:
+      user_message: |
+        {
+          "ticker": "IRCTC",
+          "fundamentals": {
+            "ticker": "IRCTC",
+            "source": "yfinance",
+            "fetched_at": "2026-08-27T10:00:00Z",
+            "dividend_yield_pct": 4.2,
+            "payout_ratio": null,
+            "dividends_per_share_history": [18.0, 18.0, 18.0, 18.0, 18.0],
+            "eps": null,
+            "free_cash_flow": 5000000000,
+            "raw_response_excerpt": "payout ratio: N/A"
+          },
+          "stored_yield_pct": 4.0
+        }
+    assert:
+      - type: javascript
+        description: status is ok
+        value: JSON.parse(output).status === 'ok'
+      - type: javascript
+        description: payout_sustainability is null when payout_ratio is missing
+        value: JSON.parse(output).payout_sustainability === null
+      - type: javascript
+        description: suggested_yield_update is still computed from dividend_yield_pct
+        value: |
+          const d = JSON.parse(output);
+          return d.suggested_yield_update !== null && Math.abs(d.suggested_yield_update - 4.2) < 0.1;
+      - type: llm-rubric
+        value: >
+          The reasoning field explicitly states that payout_sustainability could
+          not be determined because payout_ratio was null/missing.
+
+  # ── Case 5: null DPS history — yield_trend cannot be computed ─────────────
+  # dividends_per_share_history is null → yield_trend must be null.
+  # payout_ratio = 65 % → safe.
+  - description: "null DPS history → yield_trend=null, payout_sustainability still computed"
+    vars:
+      user_message: |
+        {
+          "ticker": "TCS",
+          "fundamentals": {
+            "ticker": "TCS",
+            "source": "screener",
+            "fetched_at": "2026-08-27T10:00:00Z",
+            "dividend_yield_pct": 3.5,
+            "payout_ratio": 65.0,
+            "dividends_per_share_history": null,
+            "eps": 120.0,
+            "free_cash_flow": 30000000000,
+            "raw_response_excerpt": "DPS history: unavailable"
+          },
+          "stored_yield_pct": 3.3
+        }
+    assert:
+      - type: javascript
+        description: status is ok
+        value: JSON.parse(output).status === 'ok'
+      - type: javascript
+        description: yield_trend is null when DPS history is missing
+        value: JSON.parse(output).yield_trend === null
+      - type: javascript
+        description: payout_sustainability is safe (payout_ratio 65 % is safe)
+        value: JSON.parse(output).payout_sustainability === 'safe'
+      - type: llm-rubric
+        value: >
+          The reasoning explains that yield_trend could not be computed because
+          dividends_per_share_history was null, while payout_sustainability was
+          still derived from the available payout_ratio and FCF values.

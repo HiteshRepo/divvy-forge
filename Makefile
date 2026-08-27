@@ -1,5 +1,25 @@
 .DEFAULT_GOAL := help
 
+# Prompt evaluation (promptfoo) — requires Node 22 via nvm
+NVM_EXEC := source ~/.nvm/nvm.sh && nvm use 22 --silent
+PROMPTFOO := $(NVM_EXEC) && npx --yes promptfoo@latest
+
+# ── Prompt evaluations ───────────────────────────────────────────────────────
+.PHONY: eval-fundamentals
+eval-fundamentals:  ## Evaluate fundamentals subagent prompt with promptfoo
+	$(PROMPTFOO) eval -c evals/fundamentals_subagent/promptfoo.yaml
+
+.PHONY: eval-risk
+eval-risk:  ## Evaluate dividend-cut-risk subagent prompt with promptfoo
+	$(PROMPTFOO) eval -c evals/risk_subagent/promptfoo.yaml
+
+.PHONY: eval
+eval: eval-fundamentals eval-risk  ## Run all prompt evaluations
+
+.PHONY: eval-view
+eval-view:  ## Open promptfoo results in browser
+	$(PROMPTFOO) view
+
 # ── Virtual-env helpers ──────────────────────────────────────────────────────
 VENV := .venv
 PYTHON := $(VENV)/bin/python

@@ -1,0 +1,16 @@
+- role: system
+  content: "file://../../config/prompts/risk_subagent.md"
+- role: user
+  content: |
+    Ticker: {{ticker}}
+    search_window_days: 90
+
+    === EVALUATION MODE ===
+    Since search tools are unavailable in this evaluation context, treat the
+    following as the articles returned by your news search queries.  Apply your
+    Signal Classification rules to these articles only.  Do not search for
+    additional information beyond what is provided below.
+
+    {{mock_articles}}
+
+    Produce your RiskAssessment JSON based solely on the above results.
