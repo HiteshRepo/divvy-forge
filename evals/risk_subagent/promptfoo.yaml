@@ -1,0 +1,170 @@
+description: Dividend-cut-risk subagent prompt evaluations
+
+prompts:
+  - file://prompt.yaml
+
+providers:
+  - id: openai:gpt-4o
+    config:
+      temperature: 0
+
+# Strip optional markdown code fences before assertions run.
+defaultTest:
+  options:
+    transform: "output.replace(/^```(?:json)?\\s*/m, '').replace(/\\s*```$/m, '').trim()"
+  assert:
+    - type: is-json
+      description: Output must be valid JSON
+    - type: javascript
+      description: signals and sources arrays are the same length
+      value: |
+        const d = JSON.parse(output);
+        return Array.isArray(d.signals) && Array.isArray(d.sources) && d.signals.length === d.sources.length;
+
+tests:
+  # ── Case 1: explicit dividend cut → high risk ─────────────────────────────
+  - description: "explicit dividend-cut announcement → risk_level=high, sourced signal"
+    vars:
+      ticker: INFY
+      mock_articles: |
+        Article 1
+        Title: INFY announces 30 % dividend reduction for FY2027
+        URL: https://economictimes.indiatimes.com/infy-dividend-cut-fy27
+        Summary: Infosys management confirmed on 24 Aug 2026 that the annual
+        dividend per share will be cut by 30 % to preserve cash for a pending
+        acquisition.  CFO stated: "we are reducing the payout to fund growth."
+
+    assert:
+      - type: javascript
+        description: risk_level is high
+        value: JSON.parse(output).risk_level === 'high'
+      - type: javascript
+        description: at least one signal is present
+        value: JSON.parse(output).signals.length >= 1
+      - type: javascript
+        description: source URL is cited
+        value: |
+          const d = JSON.parse(output);
+          return d.sources.some(s => typeof s.url === 'string' && s.url.length > 0);
+      - type: llm-rubric
+        value: >
+          The output correctly classifies the explicit dividend-cut announcement
+          as a HIGH-RISK signal and cites the article title and URL in sources.
+          The reasoning explains why this counts as high risk.
+
+  # ── Case 2: earnings miss, no explicit dividend language → medium risk ─────
+  - description: "earnings miss + analyst sustainability warning → risk_level=medium"
+    vars:
+      ticker: XYZ
+      mock_articles: |
+        Article 1
+        Title: XYZ Corp misses Q3 FY2026 earnings by 28 %, analysts flag dividend sustainability
+        URL: https://livemint.com/xyz-q3-miss-2026
+        Summary: XYZ Corp posted EPS of ₹12 against the street estimate of ₹16.7,
+        a 28 % miss.  Two analysts downgraded the stock and flagged dividend
+        sustainability as a concern given declining free cash flow over three
+        consecutive quarters.  No formal dividend guidance was issued.
+
+    assert:
+      - type: javascript
+        description: risk_level is medium
+        value: JSON.parse(output).risk_level === 'medium'
+      - type: javascript
+        description: at least one signal is present
+        value: JSON.parse(output).signals.length >= 1
+      - type: llm-rubric
+        value: >
+          The output correctly classifies the earnings miss and analyst
+          sustainability warning as MEDIUM-RISK (not HIGH-RISK, since no
+          explicit dividend cut was announced).  The reasoning distinguishes
+          between the concern raised and an actual cut announcement.
+
+  # ── Case 3: no relevant articles → low risk ───────────────────────────────
+  - description: "only general market articles with no dividend concerns → risk_level=low"
+    vars:
+      ticker: HDFCBANK
+      mock_articles: |
+        Article 1
+        Title: IT sector outlook positive for H2 FY2027
+        URL: https://businessstandard.com/it-sector-h2-fy27
+        Summary: Overall IT sector is expected to benefit from global demand
+        recovery.  No stock-specific or dividend commentary included.
+
+        Article 2
+        Title: HDFC Bank opens 200 new branches in tier-2 cities
+        URL: https://financialexpress.com/hdfcbank-branches-2026
+        Summary: HDFC Bank is expanding its retail footprint.  The quarterly
+        dividend was maintained at existing levels per the last board meeting.
+
+    assert:
+      - type: javascript
+        description: risk_level is low
+        value: JSON.parse(output).risk_level === 'low'
+      - type: javascript
+        description: signals array is empty
+        value: JSON.parse(output).signals.length === 0
+      - type: javascript
+        description: sources array is empty (no sourced signals)
+        value: JSON.parse(output).sources.length === 0
+      - type: llm-rubric
+        value: >
+          The output correctly returns low risk because neither article contains
+          ticker-specific dividend-cut language or earnings concerns.  The
+          reasoning states no adverse signals were found in the search window.
+
+  # ── Case 4: search tool returned no results → unknown risk ────────────────
+  - description: "no search results available → risk_level=unknown, no hard error"
+    vars:
+      ticker: PIDILITIND
+      mock_articles: |
+        No articles were returned by the search tool.  The news search API
+        returned 0 results for PIDILITIND in the last 90 days.
+
+    assert:
+      - type: javascript
+        description: risk_level is unknown
+        value: JSON.parse(output).risk_level === 'unknown'
+      - type: javascript
+        description: signals array is empty
+        value: JSON.parse(output).signals.length === 0
+      - type: javascript
+        description: reasoning explains why risk is unknown
+        value: |
+          const d = JSON.parse(output);
+          return typeof d.reasoning === 'string' && d.reasoning.length > 10;
+      - type: llm-rubric
+        value: >
+          The output returns risk_level "unknown" (not "low") and the reasoning
+          explicitly states that no search results were available, so no
+          assessment can be made — it does NOT treat the absence of results as
+          evidence of low risk.
+
+  # ── Case 5: FCF decline article, no explicit dividend language → medium ────
+  - description: "FCF deterioration signal with no explicit cut language → risk_level=medium"
+    vars:
+      ticker: TCS
+      mock_articles: |
+        Article 1
+        Title: TCS reports free cash flow decline for third consecutive quarter
+        URL: https://thehindu.com/tcs-fcf-q3-2026
+        Summary: Tata Consultancy Services reported free cash flow fell 35 % year-
+        on-year in Q3 FY2026, driven by higher capital expenditure and rising
+        employee costs.  The company did not issue dividend guidance, and
+        management made no mention of a payout change on the earnings call.
+
+    assert:
+      - type: javascript
+        description: risk_level is medium (FCF deterioration = medium signal)
+        value: JSON.parse(output).risk_level === 'medium'
+      - type: javascript
+        description: at least one signal is present
+        value: JSON.parse(output).signals.length >= 1
+      - type: javascript
+        description: source is cited for the FCF signal
+        value: JSON.parse(output).sources.length >= 1
+      - type: llm-rubric
+        value: >
+          The output classifies FCF deterioration as a MEDIUM-RISK signal (not
+          HIGH-RISK, since no explicit dividend cut was announced).  The
+          reasoning explains that FCF decline raises — but does not confirm —
+          cut risk.

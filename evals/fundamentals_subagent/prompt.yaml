@@ -1,0 +1,9 @@
+- role: system
+  content: "file://../../config/prompts/fundamentals_subagent.md"
+- role: user
+  content: |
+    {{user_message}}
+
+    Evaluation note: no sandbox or run_code tool is available in this context.
+    Compute all values directly from the input data and return the JSON result
+    without executing any code in a sandbox.
