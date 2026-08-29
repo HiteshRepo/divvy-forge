@@ -43,6 +43,11 @@ If get_fundamentals returns an error_code:
 
 ### Step 3 — Spawn two subagents CONCURRENTLY
 
+**IMPORTANT: Output NO text in this step.  Only tool calls.**
+Do not write any message before, during, or after spawning the subagents.
+Any text you output here will end your turn prematurely before you receive
+the subagent results.
+
 Spawn BOTH subagents at the same time (do not wait for one before spawning
 the other):
 
@@ -67,8 +72,14 @@ Use these instructions for subagent B:
 <<RISK_SUBAGENT_INSTRUCTIONS>>
 ---
 
-### Step 4 — Wait for both subagents to complete
-Do NOT process either subagent's output until BOTH have returned.
+### Step 4 — Receive subagent results and proceed immediately
+
+Once both subagents return, you will receive their results automatically.
+**Output NO text at this point either.**  Proceed directly and silently to
+Step 5 the moment both results are available.
+
+Parse each subagent's response as JSON.  If a subagent's response is not
+valid JSON, treat it as status "error" with error_message set to the raw text.
 
 ### Step 5 — Merge findings
 <<MERGE_FINDINGS_INSTRUCTIONS>>
@@ -78,11 +89,13 @@ Do NOT process either subagent's output until BOTH have returned.
 
 ---
 
-## Final Response Format
+## CRITICAL — Final Output Requirement
 
-Your entire response MUST end with a single JSON block tagged with
-```coordinator-output
-containing the full MergedProposal plus the diff summary:
+**You MUST output the coordinator-output block before your turn ends.**
+This is not optional.  The batch runner cannot proceed without it.
+Do not end your response with commentary, summaries, or "I have completed..."
+text.  The coordinator-output block must be the LAST thing you write.
+
 ```coordinator-output
 {
   "ticker": "<ticker>",

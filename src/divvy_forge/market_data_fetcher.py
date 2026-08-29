@@ -15,6 +15,7 @@ or via the registered entry-point::
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -130,7 +131,8 @@ def fetch_fundamentals(
 # MCP server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("market-data-fetcher")
+_PORT = int(os.environ.get("MARKET_DATA_PORT", "9002"))
+mcp = FastMCP("market-data-fetcher", port=_PORT)
 
 
 @mcp.tool()
@@ -160,4 +162,6 @@ def get_fundamentals(ticker: str) -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    transport = "sse" if "--sse" in sys.argv else "stdio"
+    mcp.run(transport=transport)

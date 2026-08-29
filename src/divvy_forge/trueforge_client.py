@@ -373,19 +373,20 @@ class TrueForgeClient:
         self,
         name: str,
         url: str,
+        description: str = "",
         auth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Register an MCP server connector in TrueForge (Settings → Connectors).
+        """Register a remote MCP server in TrueForge (Settings → Connectors).
 
+        TrueForge expects ``{"manifest": {"type": "remote", "name", "url", "description"}}``.
         Idempotent: if a connector with this name already exists (HTTP 409)
         the existing entry is returned unchanged.
 
         Args:
-            name: Connector name — must match the name used in agent manifests.
-            url:  ``mcp+stdio:///path/to/server.py`` or an HTTP URL.
-            auth: Optional auth config, e.g.::
-
-                    {"type": "header", "header": {"name": "X-Token", "value": "secret"}}
+            name:        Connector name — must match the name used in agent manifests.
+            url:         HTTP base URL of the running MCP server (e.g. ``http://localhost:9001``).
+            description: Human-readable description shown in the TrueForge UI.
+            auth:        Optional auth config dict (passed through to the manifest).
 
         Returns:
             The connector object as returned by the API.
@@ -393,11 +394,16 @@ class TrueForgeClient:
         Raises:
             httpx.HTTPStatusError: On unexpected API errors (non-409).
         """
-        body: dict[str, Any] = {"name": name, "url": url}
+        manifest: dict[str, Any] = {
+            "type": "remote",
+            "name": name,
+            "url": url,
+            "description": description or name,
+        }
         if auth is not None:
-            body["auth"] = auth
+            manifest["auth"] = auth
         try:
-            return self._post("/api/v1/settings/mcp-servers", body)
+            return self._post("/api/v1/settings/mcp-servers", {"manifest": manifest})
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
                 return exc.response.json()

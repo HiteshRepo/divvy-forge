@@ -653,7 +653,8 @@ def _open_pr(
 # MCP server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("github-pr-opener")
+_PORT = int(os.environ.get("GITHUB_PR_OPENER_PORT", "9003"))
+mcp = FastMCP("github-pr-opener", port=_PORT)
 
 
 @mcp.tool()
@@ -743,4 +744,6 @@ def open_pr(ticker: str, date: str, proposal_json: str, pr_body: str) -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    transport = "sse" if "--sse" in sys.argv else "stdio"
+    mcp.run(transport=transport)

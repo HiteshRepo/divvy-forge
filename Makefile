@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
 
 # Prompt evaluation (promptfoo) — requires Node 22 via nvm
-NVM_EXEC := source ~/.nvm/nvm.sh && nvm use 22 --silent
-PROMPTFOO := $(NVM_EXEC) && npx --yes promptfoo@latest
+NODE_BIN := $(HOME)/.nvm/versions/node/v22.22.0/bin
+PROMPTFOO := $(NODE_BIN)/node node_modules/.bin/promptfoo
 
 # ── Prompt evaluations ───────────────────────────────────────────────────────
 .PHONY: eval-fundamentals
@@ -85,6 +85,18 @@ serve-market-data:  ## Start market-data-fetcher MCP server over stdio
 serve-github-pr:  ## Start github-pr-opener MCP server over stdio
 	$(PYTHON) -m divvy_forge.github_pr_opener
 
+.PHONY: serve-divvy-reader-http
+serve-divvy-reader-http:  ## Start divvy-reader as HTTP/SSE server on port 9001
+	$(PYTHON) -m divvy_forge.divvy_reader --sse
+
+.PHONY: serve-market-data-http
+serve-market-data-http:  ## Start market-data-fetcher as HTTP/SSE server on port 9002
+	$(PYTHON) -m divvy_forge.market_data_fetcher --sse
+
+.PHONY: serve-github-pr-http
+serve-github-pr-http:  ## Start github-pr-opener as HTTP/SSE server on port 9003
+	$(PYTHON) -m divvy_forge.github_pr_opener --sse
+
 .PHONY: inspect-divvy-reader
 inspect-divvy-reader:  ## Open MCP Inspector for divvy-reader in browser
 	$(MCP) dev src/divvy_forge/divvy_reader.py
@@ -99,6 +111,7 @@ inspect-github-pr:  ## Open MCP Inspector for github-pr-opener in browser
 
 # ── TrueForge resource management ───────────────────────────────────────────
 TF_URL ?= http://localhost:8790
+TF_DB := $(HOME)/Library/Application Support/trueforge/db/db.sqlite
 
 .PHONY: trueforge-local-up
 trueforge-local-up: 
@@ -115,6 +128,15 @@ agents-delete:  ## Delete agent by name   NAME=my-agent make agents-delete
 	@test -n "$(AGENT_ID)" || (echo "Agent '$(NAME)' not found" && exit 1)
 	@curl -s -X DELETE $(TF_URL)/api/v1/agents/$(AGENT_ID) && echo "Deleted agent '$(NAME)' ($(AGENT_ID))"
 
+.PHONY: connectors-delete
+connectors-delete:  ## Delete a connector by name   NAME=divvy-reader make connectors-delete
+	@test -n "$(NAME)" || (echo "Usage: NAME=divvy-reader make connectors-delete" && exit 1)
+	@sqlite3 "$(TF_DB)" "DELETE FROM mcp_server WHERE name='$(NAME)'; SELECT CASE changes() WHEN 0 THEN 'Connector not found: $(NAME)' ELSE 'Deleted connector: $(NAME)' END;"
+
+.PHONY: connectors-clean
+connectors-clean:  ## Delete ALL registered connectors
+	@sqlite3 "$(TF_DB)" "DELETE FROM mcp_server; SELECT changes() || ' connector(s) deleted';"
+
 .PHONY: mcp-list
 mcp-list:  ## List all registered MCP servers
 	@curl -s $(TF_URL)/api/v1/settings/mcp-servers | python3 -m json.tool
@@ -122,6 +144,12 @@ mcp-list:  ## List all registered MCP servers
 .PHONY: providers-list
 providers-list:  ## List all registered model providers
 	@curl -s $(TF_URL)/api/v1/settings/model-providers | python3 -m json.tool
+
+.PHONY: providers-add-model
+providers-add-model:  ## Open TrueForge UI to add a model (no API — use the UI)
+	@echo "TrueForge has no API for adding models to an existing provider."
+	@echo "Open $(TF_URL) → Settings → Model Providers → openai → Add model."
+	@echo "Then update config/coordinator_agent.yaml with the new model name and run: make deploy"
 
 .PHONY: sessions-list
 sessions-list:  ## List recent sessions
@@ -135,7 +163,7 @@ sandbox-verify:  ## Smoke-test Daytona sandbox (deploy minimal agent, run trivia
 # ── Deploy ───────────────────────────────────────────────────────────────────
 .PHONY: deploy
 deploy:  ## Register MCP servers and coordinator agent on the TrueForge instance
-	$(PYTHON) -m divvy_forge.deploy
+	$(PYTHON) deploy.py
 
 # ── Help ─────────────────────────────────────────────────────────────────────
 .PHONY: help

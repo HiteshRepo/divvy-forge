@@ -1,0 +1,39 @@
+# Coordinator agent manifest for divvy-forge.
+#
+# This file is the source of truth for the TrueForge agent registration.
+# deploy.py reads it, resolves `instructions_file` to the assembled system
+# prompt, and calls TrueForgeClient.register_agent("dividend-review-coordinator",
+# manifest) at deploy time.
+#
+# Fields
+# ------
+# instructions_file : path relative to the repo root.
+#   Resolved by deploy.py to the full assembled coordinator system prompt.
+#   The file at this path is a template — coordinator_prompts.py assembles the
+#   final text by substituting <<SECTION>> markers with the subagent instruction
+#   files under config/prompts/.
+#
+# mcp_servers : list of server names.
+#   Each name must match the `name` used when registering the MCP server via
+#   TrueForgeClient.register_mcp_server(). deploy.py registers all three before
+#   creating the agent.
+
+name: dividend-review-coordinator
+
+model: openai/gpt-5-4-mini
+
+# Resolved at deploy time by deploy.py via coordinator_prompts.COORDINATOR_SYSTEM_PROMPT.
+instructions_file: config/prompts/coordinator_system.md
+
+mcp_servers:
+  - divvy-reader
+  - market-data-fetcher
+  - github-pr-opener
+
+config:
+  dynamic_sub_agents:
+    enabled: true
+  sandbox:
+    enabled: true
+  ask_user_questions:
+    enabled: false

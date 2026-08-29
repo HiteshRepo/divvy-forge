@@ -171,6 +171,42 @@ def _build_result(data: dict[str, Any], raw_output: str, threads_created: list[s
 # ---------------------------------------------------------------------------
 
 _USER_MESSAGE_TEMPLATE = "Review ticker: {ticker}"
+_MAX_CONTINUATION_TURNS = 10
+
+
+def _stream_one_turn(
+    client: TrueForgeClient,
+    session_id: str,
+    message: str,
+    threads_created: list[str],
+    threads_done: list[str],
+) -> tuple[str, bool]:
+    """Stream a single turn and return (final_output, had_error).
+
+    Appends thread IDs to the provided lists in-place.
+    Returns the last model/turn output text and whether the turn errored.
+    """
+    output = ""
+    had_error = False
+    error_msg = ""
+
+    for event in client.stream_turn(session_id, message):
+        if isinstance(event, ThreadCreatedEvent):
+            threads_created.append(event.thread_id)
+        elif isinstance(event, ThreadDoneEvent):
+            threads_done.append(event.thread_id)
+        elif isinstance(event, ModelMessageEvent):
+            output = event.content
+        elif isinstance(event, TurnDoneEvent):
+            if event.status == "error":
+                had_error = True
+                error_msg = event.error_message or "unknown error"
+            elif event.output_content:
+                output = event.output_content
+
+    if had_error:
+        raise RuntimeError(error_msg)
+    return output, had_error
 
 
 def run_coordinator_turn(
@@ -178,7 +214,12 @@ def run_coordinator_turn(
     session_id: str,
     ticker: str,
 ) -> CoordinatorResult:
-    """Stream a coordinator turn for *ticker* and return a parsed result.
+    """Stream coordinator turns for *ticker* until coordinator-output is produced.
+
+    TrueForge may split the coordinator's work across multiple turns (e.g. when
+    ask_user_questions fires or when the agent pauses mid-task).  This function
+    keeps submitting continuation turns until it finds a coordinator-output block
+    or exceeds ``_MAX_CONTINUATION_TURNS``.
 
     Parameters
     ----------
@@ -197,36 +238,35 @@ def run_coordinator_turn(
     Raises
     ------
     ValueError
-        If the coordinator response cannot be parsed.
+        If no coordinator-output block is found after all continuation turns.
     RuntimeError
-        If the TrueForge turn ends with status ``"error"``.
+        If any TrueForge turn ends with status ``"error"``.
     """
-    user_message = _USER_MESSAGE_TEMPLATE.format(ticker=ticker)
     threads_created: list[str] = []
     threads_done: list[str] = []
-    final_output: str = ""
 
-    for event in client.stream_turn(session_id, user_message):
-        if isinstance(event, ThreadCreatedEvent):
-            threads_created.append(event.thread_id)
+    # First turn — submit the user request.
+    message = _USER_MESSAGE_TEMPLATE.format(ticker=ticker)
+    final_output, _ = _stream_one_turn(client, session_id, message, threads_created, threads_done)
 
-        elif isinstance(event, ThreadDoneEvent):
-            threads_done.append(event.thread_id)
+    # Check if we already have the coordinator-output block.
+    if _COORDINATOR_OUTPUT_RE.search(final_output):
+        data = _parse_coordinator_output(final_output)
+        return _build_result(data, final_output, threads_created, threads_done)
 
-        elif isinstance(event, ModelMessageEvent):
-            final_output = event.content
+    # Continuation loop — TrueForge may need additional turns to finish.
+    for _ in range(_MAX_CONTINUATION_TURNS - 1):
+        continuation_output, _ = _stream_one_turn(
+            client, session_id, "continue", threads_created, threads_done
+        )
+        if continuation_output:
+            final_output = continuation_output
 
-        elif isinstance(event, TurnDoneEvent):
-            if event.status == "error":
-                raise RuntimeError(
-                    f"Coordinator turn failed for ticker '{ticker}': "
-                    f"{event.error_message or 'unknown error'}"
-                )
-            if event.output_content:
-                final_output = event.output_content
+        if _COORDINATOR_OUTPUT_RE.search(final_output):
+            data = _parse_coordinator_output(final_output)
+            return _build_result(data, final_output, threads_created, threads_done)
 
-    if not final_output:
-        raise ValueError(f"Coordinator produced no output for ticker '{ticker}'")
-
-    data = _parse_coordinator_output(final_output)
-    return _build_result(data, final_output, threads_created, threads_done)
+    raise ValueError(
+        f"Coordinator produced no coordinator-output block for ticker '{ticker}' "
+        f"after {_MAX_CONTINUATION_TURNS} turns. Last output: {final_output[:200]!r}"
+    )

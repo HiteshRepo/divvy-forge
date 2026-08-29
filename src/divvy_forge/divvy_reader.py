@@ -266,7 +266,8 @@ def _read_ticker(ticker: str, http_client: httpx.Client | None = None) -> dict:
 # MCP server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("divvy-reader")
+_PORT = int(os.environ.get("DIVVY_READER_PORT", "9001"))
+mcp = FastMCP("divvy-reader", port=_PORT)
 
 
 @mcp.tool()
@@ -303,4 +304,6 @@ def read_ticker(ticker: str) -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    transport = "sse" if "--sse" in sys.argv else "stdio"
+    mcp.run(transport=transport)
